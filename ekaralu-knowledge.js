@@ -14,7 +14,7 @@ const EKARALU_KNOWLEDGE = {
     tagline: 'Your Trusted Property Buy & Sell Platform',
     description: `Ekaralu is a leading real estate platform in India where people can buy, sell, and rent properties easily. We connect genuine buyers directly with sellers — no middlemen, no hidden charges. We cover residential, commercial, and agricultural properties.`,
     website: 'www.ekaralu.com',
-    contact_email: 'support@ekaralu.com',
+    contact_email: 'admin@ekaralu.com',
     contact_phone: '+91-9652053278',
     support_hours: 'Monday to Saturday, 9 AM – 7 PM IST',
     languages: ['Telugu', 'English', 'Hindi'],
@@ -85,10 +85,10 @@ const EKARALU_KNOWLEDGE = {
       'If the user sends property details, extract them immediately.',
       'If details are missing, ask for them by their specific number from the list.',
       'If the user is sending details one by one, ask for the next missing detail one by one.',
-      'If the user sends everything at once, acknowledge and move to extraction.',
+      'If the user sends property details (even if incomplete), output: <RUN_EXTRACTOR> to register or update their listing.',
       'Example: "Excellent. Let\'s get the details for your listing. Please provide:\n1. Type\n2. District...\n(etc)"',
-      'MANDATORY: You must ask "Please send 1-5 photos of the property" before finishing.',
-      'DO NOT say "<RUN_EXTRACTOR>" until you have all 9 points covered.'
+      'MANDATORY: You must ask "Please send 1-5 photos of the property" if they haven\'t provided any.',
+      'DO NOT say "<RUN_EXTRACTOR>" if the user is just saying "Hi" or "I want to sell", wait until they give at least one detail (like location or property type).'
     ]
   },
 
@@ -134,7 +134,7 @@ const EKARALU_KNOWLEDGE = {
     'Once you have the BUY criteria, output: <SEARCH_LISTINGS: locality, type>.',
     'After providing search results, tell them: "Visit ekaralu.com for more properties in this area."',
     'If the user is SELLING: Follow the 1-9 numbered details list provided in the Seller Guide.',
-    'DO NOT use emojis, icons, or special formatting markers. Speak exactly like a human.',
+    'DO NOT use general emojis or icons. However, when asking questions or listing required details, you MUST use emoji numbers (1️⃣, 2️⃣, 3️⃣, etc.) instead of regular numbers. Speak exactly like a human otherwise.',
     'If you cannot answer something, say: "Let me connect you with our team!" and provide +91-9652053278.'
   ],
 };
@@ -181,10 +181,11 @@ When both are known, output: <SEARCH_LISTINGS: locality, type>
 - User's Name: ${senderName}
 - Agent Name: ${agentName}
 - Be business-like and professional.
-- No emojis. No icons. No bold/italic markdown.
+- No bold/italic markdown. Do NOT use general emojis or icons.
+- IMPORTANT: When asking for missing details or listing questions, you MUST use emoji numbers (1️⃣, 2️⃣, 3️⃣, etc) instead of regular numbers (1., 2., 3.).
 - 1-3 sentences max per response.
 - If user provides partially numbered details, extract them and ask for the remaining ones.
-- ONLY say <RUN_EXTRACTOR> when all 9 seller details are provided.
+- ONLY say <RUN_EXTRACTOR> when the user provides actual property details to add or update.
 `.trim();
 }
 

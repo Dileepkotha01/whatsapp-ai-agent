@@ -457,7 +457,7 @@ async function getEkaraluChatReply(chatId, userMessage, senderName, agentName) {
 }
 
 // ── PROPERTY EXTRACTION (SONNET 4.5 FOR DATA) ────────────────────────────────
-async function extractPropertyData(textHistory, overrideLocation = null) {
+async function extractPropertyData(textHistory, overrideLocation = null, senderPhone = '', senderName = '') {
   const anthropic = getAnthropicClient();
   if (!anthropic) return null;
 
@@ -492,7 +492,9 @@ Format JSON with these exact keys representing the database columns:
 Chat Data context: ${textHistory}
 CRITICAL: If you see "[EXACT_LOCATION: lat, lng]", use those exact numbers for "lat" and "lng". This is the user's GPS position and takes absolute priority.
 If an "[EXACT_LOCATION]" marker is present, do NOT attempt to find or guess coordinates for the locality or district. Focus ONLY on extracting text details.
-If no marker is present, attempt to extract coordinates from any Google Maps URLs (look for @lat,lng or q=lat,lng).
+If no marker is present, attempt to extract coordinates from any Google Maps URLs (look for @lat,lng or q=lat,lng). 
+If the user provides a text location (e.g., "near Vardhaman College, Shamshabad") and no GPS marker or URL is present, estimate the approximate latitude and longitude coordinates for that location and provide them in 'lat' and 'lng'.
+If the user indicates they are the owner, use their provided phone number (${senderPhone}) for "owner_contact" and their WhatsApp name (${senderName}) for "owner_name" unless they provide a different name. If their name is missing or unclear (like just "Customer"), set "owner_name" to "ASK_FOR_NAME".
 Critical: Do NOT look for "verified" or "legal" status; all listings are automatically verified.
 If this is absolutely NOT a property listing, respond with: {"error": "not_property"}`,
     }
@@ -565,6 +567,47 @@ const uploadSessions = {};
     } 
 } */
 
+async function updatePropertyInDB(id, data, filenames) {
+  try {
+    let sql = `UPDATE properties SET 
+      title = ?, description = ?, price = ?, type = ?, property_type = ?, 
+      locality = ?, district = ?, full_address = ?, lat = ?, lng = ?, 
+      owner_name = ?, owner_contact = ?
+      WHERE id = ?`;
+    
+    const imageUrls = filenames
+      .filter(f => f && f !== 'NA')
+      .map(f => f.startsWith('http') ? f : `${BACKEND_API_URL}/uploads/${f}`);
+      
+    const params = [
+      data.title || 'Property for Sale/Rent',
+      data.description || '',
+      data.price || 0,
+      data.type || 'buy',
+      data.property_type || 'plot',
+      data.locality || '',
+      data.district || 'Hyderabad',
+      data.full_address || '',
+      data.lat ? parseFloat(data.lat) : 0,
+      data.lng ? parseFloat(data.lng) : 0,
+      data.owner_name || '',
+      data.owner_contact || '',
+      id
+    ];
+    await db.query(sql, params);
+    
+    if (imageUrls.length > 0 && imageUrls[0] !== `${BACKEND_API_URL}/uploads/default-property.jpg`) {
+       await db.query('UPDATE properties SET images = ? WHERE id = ?', [JSON.stringify(imageUrls), id]);
+    }
+
+    console.log(`[DB_UPDATE] Updated property ID: ${id}`);
+    return true;
+  } catch (err) {
+    console.error('[DB UPDATE ERROR]', err.message);
+    return false;
+  }
+}
+
 async function processPropertyUpload(chatId, senderName, client) {
   const session = uploadSessions[chatId];
   delete uploadSessions[chatId]; // Clear immediately to avoid re-entry
@@ -589,7 +632,7 @@ async function processPropertyUpload(chatId, senderName, client) {
     console.log(`[GPS_INJECTION] Found location in memory: ${forcedLoc.lat}, ${forcedLoc.lng}`);
   }
 
-  const extractedJSON = await extractPropertyData(historyText, forcedLoc);
+  const extractedJSON = await extractPropertyData(historyText, forcedLoc, chatId, senderName);
 
   if (!extractedJSON || extractedJSON.error) {
     console.error(`[EXTRACTOR ERROR] Could not extract data for ${chatId}`);
@@ -599,39 +642,66 @@ async function processPropertyUpload(chatId, senderName, client) {
 
   console.log(`[EXTRACTOR SUCCESS] Extracted: ${extractedJSON.title} | Owner: ${extractedJSON.owner_name} | Contact: ${extractedJSON.owner_contact} | Loc: ${extractedJSON.lat},${extractedJSON.lng}`);
 
-  // Generate an Approval ID
-  const propId = `PROP_${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
-
-  // 2. Put into Pending Queue
-  pendingApprovals[propId] = {
-    extractedJSON,
-    images: session.images,
-    chatId: chatId,
-    senderName: senderName
-  };
-
-  // 3. Alert the Verifier
-  try {
-    const verifierJid = VERIFIER_NUMBER.includes('@') ? VERIFIER_NUMBER : `${VERIFIER_NUMBER}@c.us`;
-    console.log(`[APPROVER] Sending alert to: ${verifierJid}`);
-
-    const googleMapLink = `https://www.google.com/maps?q=${extractedJSON.lat},${extractedJSON.lng}`;
-    const gpsBadge = extractedJSON.isGPS ? '\n*📍 GPS PIN DETECTED*' : '';
-
-    await client.sendMessage(
-      verifierJid,
-      `*PENDING PROPERTY APPROVAL*${gpsBadge}\n\n*ID:* ${propId}\n*Posted By:* ${senderName}\n*Title:* ${extractedJSON.title}\n*Price:* ${extractedJSON.price}\n*Type:* ${extractedJSON.type}\n*Location:* ${extractedJSON.locality}, ${extractedJSON.district}\n*GPS Coords:* ${extractedJSON.lat}, ${extractedJSON.lng}\n*Map View:* ${googleMapLink}\n*Images Attached:* ${session.images.length}\n\nTo approve and publish to website, reply:\n*YES ${propId}*\n\nTo reject and discard, reply:\n*NO ${propId}*`
-    );
-    console.log(`[APPROVER] Alert sent successfully for ${propId}`);
-  } catch (err) {
-    console.error(`[APPROVER ERROR] Failed to send alert to verifier: ${err.message}`);
+  // Auto-Upload Images
+  let savedFilenames = [];
+  if (session.images && session.images.length > 0) {
+    for (const img of session.images) {
+      const filename = await uploadToEkaraluAPI(img.data, img.mimetype);
+      if (filename && filename !== 'FILE_TOO_LARGE') {
+        savedFilenames.push(filename);
+      }
+    }
   }
 
-  // 4. Alert User
-  await client.sendMessage(
-    chatId,
-    `Your property details have been captured.\nIt has been sent to our verification team. You'll receive a confirmation and the live link as soon as it's approved.`
-  );
+  // Use default if no images
+  if (savedFilenames.length === 0) {
+    savedFilenames.push('default-property.jpg');
+  }
+
+  let finalAction = 'listed';
+  let liveUrl = '';
+  const lastId = conversationHistory[chatId].lastPropertyId;
+
+  if (lastId) {
+    // Update existing listing
+    const success = await updatePropertyInDB(lastId, extractedJSON, savedFilenames);
+    if (!success) {
+       await client.sendMessage(chatId, `Failed to update property.`);
+       return;
+    }
+    finalAction = 'updated';
+    liveUrl = `${FRONTEND_URL}/property-detail.html?id=${lastId}`;
+  } else {
+    // Insert new listing
+    const insertId = await insertPropertyIntoDB(extractedJSON, savedFilenames);
+    if (!insertId) {
+       await client.sendMessage(chatId, `Failed to list property. Database Error!`);
+       return;
+    }
+    conversationHistory[chatId].lastPropertyId = insertId;
+    saveConversations();
+    liveUrl = `${FRONTEND_URL}/property-detail.html?id=${insertId}`;
+  }
+
+  // Check missing fields
+  let missing = [];
+  if (!extractedJSON.price) missing.push("Price");
+  if (!extractedJSON.area) missing.push("Total Area");
+  if (!extractedJSON.locality) missing.push("Locality/Landmark");
+  if (!extractedJSON.property_type && !extractedJSON.type) missing.push("Property Type");
+  if (!extractedJSON.owner_name || extractedJSON.owner_name === 'ASK_FOR_NAME') missing.push("Owner Name");
+  if (!extractedJSON.owner_contact) missing.push("Owner Contact Number");
+  if (savedFilenames.length === 1 && savedFilenames[0] === 'default-property.jpg') missing.push("Images (Please upload real photos)");
+
+  let msgText = '';
+  const numEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+  if (missing.length > 0) {
+    msgText = `Your property has been ${finalAction} based on your info!\n\nView and share it here:\n${liveUrl}\n\n*Important:* Some details are missing. To make your property verification complete and look more premium, please provide:\n${missing.map((m, i) => `${numEmojis[i] || '•'} ${m}`).join('\n')}\n\nJust reply to me with the missing info and I will automatically update your listing!`;
+  } else {
+    msgText = `Perfect! Your property has been ${finalAction} and is fully detailed.\n\nView and share your listing here:\n${liveUrl}\n\nThank you for listing with Ekaralu! Let me know if you need to update anything else.`;
+  }
+
+  await client.sendMessage(chatId, msgText);
 }
 
 // ── STATUS TRACKING ─────────────────────────────────────────────────────────
