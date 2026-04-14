@@ -65,6 +65,48 @@ setInterval(() => {
   console.log(`[HEARTBEAT] Bot is active. Time: ${new Date().toISOString()}`);
 }, 3600000); // 1 hour
 
+// ── AUTOMATED REMINDERS (10-Min & 24-Hour) ───────────────────────────────────
+setInterval(() => {
+  if (!botStatus || botStatus.state !== 'ready' || !client) return;
+
+  const now = Date.now();
+  for (const chatId in conversationHistory) {
+    const session = conversationHistory[chatId];
+    
+    // Ignore users who haven't interacted properly
+    if (!session.lastActivityTime) continue;
+
+    const timeSinceLastActivity = now - session.lastActivityTime;
+
+    // 10-Minute Missing Details Reminder
+    if (session.hasIncompleteListing && !session.reminded10Min) {
+      if (timeSinceLastActivity > 10 * 60 * 1000) { // 10 minutes
+        session.reminded10Min = true;
+        saveConversations();
+        
+        client.sendMessage(chatId, `Hello! We noticed your recently submitted property is missing some details. To get the best results and a verified premium listing, please reply with the missing property information (like exact images, location, or price).`).catch(err => console.error('[REMINDER ERR]', err));
+        console.log(`[REMINDER] Sent 10-min missing details reminder to ${chatId}`);
+        continue; // Only do one reminder type per tick
+      }
+    }
+
+    // 24-Hour Follow Up Reminder
+    const msInDay = 24 * 60 * 60 * 1000;
+    if (timeSinceLastActivity > msInDay) {
+      // Check if we already followed up today (or ever)
+      const timeSinceLastFollowUp = session.lastDailyFollowUp ? (now - session.lastDailyFollowUp) : msInDay;
+      
+      if (timeSinceLastFollowUp >= msInDay) {
+         session.lastDailyFollowUp = now;
+         saveConversations();
+
+         client.sendMessage(chatId, `Hi from Ekaralu! 🌟 Just checking in. Did you know properties with proper photos and explicit location details reach 3x more buyers? Reply to this message if you'd like to update your active listings or search for new properties!`).catch(err => console.error('[REMINDER ERR]', err));
+         console.log(`[REMINDER] Sent 24-hour follow-up to ${chatId}`);
+      }
+    }
+  }
+}, 60000); // Check every minute
+
 // Enable CORS - restricted to production domain in production
 const cors = require('cors');
 const corsOptions = {
@@ -344,6 +386,18 @@ async function searchPropertiesInDB(locality, type) {
   }
 }
 
+async function getUserProperties(chatId) {
+  try {
+    const phone = chatId.replace(/\D/g, '');
+    let sql = 'SELECT id, title, type, property_type, locality, price FROM properties WHERE owner_contact = ? AND status = "active" ORDER BY created_at DESC';
+    const [rows] = await db.query(sql, [phone]);
+    return rows;
+  } catch (err) {
+    console.error('[DB GET USER PROPERTIES ERROR]', err.message);
+    return [];
+  }
+}
+
 /**
  * Deep-Link Resolver (100% Accuracy Fix):
  * Resolves short links and scrapes the page HTML for hidden coordinates.
@@ -429,13 +483,13 @@ async function resolveGoogleMapsUrl(text) {
 }
 
 // ── EKARALU AI REPLY (HAIKU FOR CHAT) ─────────────────────────────────────────
-async function getEkaraluChatReply(chatId, userMessage, senderName, agentName) {
+async function getEkaraluChatReply(chatId, userMessage, senderName, agentName, userProps) {
   const anthropic = getAnthropicClient();
   if (!anthropic) return { success: false, error: 'API_KEY_NOT_SET' };
 
   addToHistory(chatId, 'user', userMessage);
 
-  const sysPrompt = buildSystemPrompt(senderName, agentName);
+  const sysPrompt = buildSystemPrompt(senderName, agentName, userProps);
 
   try {
     const response = await anthropic.messages.create({
@@ -457,15 +511,20 @@ async function getEkaraluChatReply(chatId, userMessage, senderName, agentName) {
 }
 
 // ── PROPERTY EXTRACTION (SONNET 4.5 FOR DATA) ────────────────────────────────
-async function extractPropertyData(textHistory, overrideLocation = null, senderPhone = '', senderName = '') {
+async function extractPropertyData(textHistory, forcedLoc = null, chatId = '', senderName = '', existingProperty = null) {
   const anthropic = getAnthropicClient();
   if (!anthropic) return null;
 
   const messageContent = [
     {
       type: 'text',
-      text: `Analyze the provided chat history context. Extract all property details and output ONLY a raw JSON object with no markdown and no surrounding text.
-Format JSON with these exact keys representing the database columns:
+      text: existingProperty
+        ? `You are UPDATING an existing property listing. Current Property JSON State:\n${JSON.stringify(existingProperty, null, 2)}\n\nRead the provided chat history to see what the user wants to change. Apply those changes to the existing property data. Keep other existing fields unchanged unless implied. Output ONLY the FULL, merged JSON object with no markdown and no surrounding text.`
+        : `Analyze the provided chat history context. Extract all property details and output ONLY a raw JSON object with no markdown and no surrounding text.`,
+    },
+    {
+      type: 'text',
+      text: `Format JSON with these exact keys representing the database columns:
 {
   "title": "", // A catchy short title
   "description": "", // Detailed description
@@ -494,7 +553,7 @@ CRITICAL: If you see "[EXACT_LOCATION: lat, lng]", use those exact numbers for "
 If an "[EXACT_LOCATION]" marker is present, do NOT attempt to find or guess coordinates for the locality or district. Focus ONLY on extracting text details.
 If no marker is present, attempt to extract coordinates from any Google Maps URLs (look for @lat,lng or q=lat,lng). 
 If the user provides a text location (e.g., "near Vardhaman College, Shamshabad") and no GPS marker or URL is present, estimate the approximate latitude and longitude coordinates for that location and provide them in 'lat' and 'lng'.
-If the user indicates they are the owner, use their provided phone number (${senderPhone}) for "owner_contact" and their WhatsApp name (${senderName}) for "owner_name" unless they provide a different name. If their name is missing or unclear (like just "Customer"), set "owner_name" to "ASK_FOR_NAME".
+If the user indicates they are the owner, use their provided phone number (${chatId.replace(/\D/g, '')}) for "owner_contact" and their WhatsApp name (${senderName}) for "owner_name" unless they provide a different name. If their name is missing or unclear (like just "Customer"), set "owner_name" to "ASK_FOR_NAME".
 Critical: Do NOT look for "verified" or "legal" status; all listings are automatically verified.
 If this is absolutely NOT a property listing, respond with: {"error": "not_property"}`,
     }
@@ -520,9 +579,9 @@ If this is absolutely NOT a property listing, respond with: {"error": "not_prope
 
     // -- MANUAL OVERRIDE FOR EXACT LOCATION (PROFESSIONAL FIX) --
     // Priority 1: Direct session GPS capture (passed via function argument)
-    if (overrideLocation && overrideLocation.lat !== undefined && overrideLocation.lng !== undefined) {
-      data.lat = parseFloat(overrideLocation.lat);
-      data.lng = parseFloat(overrideLocation.lng);
+    if (forcedLoc && forcedLoc.lat !== undefined && forcedLoc.lng !== undefined) {
+      data.lat = parseFloat(forcedLoc.lat);
+      data.lng = parseFloat(forcedLoc.lng);
       data.isGPS = true;
       console.log(`[EXTRACT] Applying LOCKED-IN session GPS coordinates: ${data.lat}, ${data.lng}`);
     }
@@ -614,6 +673,23 @@ async function processPropertyUpload(chatId, senderName, client) {
 
   if (!session) return;
 
+  const mode = conversationHistory[chatId].listingMode || 'NEW';
+  let targetUpdateId = conversationHistory[chatId].activeUpdateId;
+  let existingProperty = null;
+
+  if (mode === 'EDIT' && targetUpdateId) {
+    try {
+      const [rows] = await db.query('SELECT * FROM properties WHERE id = ?', [targetUpdateId]);
+      if (rows && rows.length > 0) {
+        existingProperty = rows[0];
+      } else {
+        targetUpdateId = null; // Fallback to NEW if id is invalid
+      }
+    } catch (e) {
+      console.error('[DB FETCH ERROR for EDIT]', e);
+    }
+  }
+
   // 1. Prepare entire text history for the extractor
   let historyText = getHistory(chatId).map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
 
@@ -632,7 +708,7 @@ async function processPropertyUpload(chatId, senderName, client) {
     console.log(`[GPS_INJECTION] Found location in memory: ${forcedLoc.lat}, ${forcedLoc.lng}`);
   }
 
-  const extractedJSON = await extractPropertyData(historyText, forcedLoc, chatId, senderName);
+  const extractedJSON = await extractPropertyData(historyText, forcedLoc, chatId, senderName, existingProperty);
 
   if (!extractedJSON || extractedJSON.error) {
     console.error(`[EXTRACTOR ERROR] Could not extract data for ${chatId}`);
@@ -642,47 +718,6 @@ async function processPropertyUpload(chatId, senderName, client) {
 
   console.log(`[EXTRACTOR SUCCESS] Extracted: ${extractedJSON.title} | Owner: ${extractedJSON.owner_name} | Contact: ${extractedJSON.owner_contact} | Loc: ${extractedJSON.lat},${extractedJSON.lng}`);
 
-  // Auto-Upload Images
-  let savedFilenames = [];
-  if (session.images && session.images.length > 0) {
-    for (const img of session.images) {
-      const filename = await uploadToEkaraluAPI(img.data, img.mimetype);
-      if (filename && filename !== 'FILE_TOO_LARGE') {
-        savedFilenames.push(filename);
-      }
-    }
-  }
-
-  // Use default if no images
-  if (savedFilenames.length === 0) {
-    savedFilenames.push('default-property.png');
-  }
-
-  let finalAction = 'listed';
-  let liveUrl = '';
-  const lastId = conversationHistory[chatId].lastPropertyId;
-
-  if (lastId) {
-    // Update existing listing
-    const success = await updatePropertyInDB(lastId, extractedJSON, savedFilenames);
-    if (!success) {
-       await client.sendMessage(chatId, `Failed to update property.`);
-       return;
-    }
-    finalAction = 'updated';
-    liveUrl = `${FRONTEND_URL}/property-detail.html?id=${lastId}`;
-  } else {
-    // Insert new listing
-    const insertId = await insertPropertyIntoDB(extractedJSON, savedFilenames);
-    if (!insertId) {
-       await client.sendMessage(chatId, `Failed to list property. Database Error!`);
-       return;
-    }
-    conversationHistory[chatId].lastPropertyId = insertId;
-    saveConversations();
-    liveUrl = `${FRONTEND_URL}/property-detail.html?id=${insertId}`;
-  }
-
   // Check missing fields
   let missing = [];
   if (!extractedJSON.price) missing.push("Price");
@@ -691,17 +726,67 @@ async function processPropertyUpload(chatId, senderName, client) {
   if (!extractedJSON.property_type && !extractedJSON.type) missing.push("Property Type");
   if (!extractedJSON.owner_name || extractedJSON.owner_name === 'ASK_FOR_NAME') missing.push("Owner Name");
   if (!extractedJSON.owner_contact) missing.push("Owner Contact Number");
-  if (savedFilenames.length === 1 && savedFilenames[0] === 'default-property.png') missing.push("Images (Please upload real photos)");
+  if (!session.images || session.images.length === 0) missing.push("Images (Please upload real photos)");
 
-  let msgText = '';
+  // Register completion status for automated reminders
+  conversationHistory[chatId].hasIncompleteListing = missing.length > 0;
+  conversationHistory[chatId].reminded10Min = false;
+  saveConversations();
+
   const numEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-  if (missing.length > 0) {
-    msgText = `Your property has been ${finalAction} based on your info!\n\nView and share it here:\n${liveUrl}\n\n*Important:* Some details are missing. To make your property verification complete and look more premium, please provide:\n${missing.map((m, i) => `${numEmojis[i] || '•'} ${m}`).join('\n')}\n\nJust reply to me with the missing info and I will automatically update your listing!`;
-  } else {
-    msgText = `Perfect! Your property has been ${finalAction} and is fully detailed.\n\nView and share your listing here:\n${liveUrl}\n\nThank you for listing with Ekaralu! Let me know if you need to update anything else.`;
-  }
 
-  await client.sendMessage(chatId, msgText);
+  const lastId = targetUpdateId || conversationHistory[chatId].lastPropertyId;
+
+  if (mode === 'EDIT' && lastId) {
+    // Auto-Upload Images for EDIT
+    let savedFilenames = [];
+    if (session.images && session.images.length > 0) {
+      for (const img of session.images) {
+        const filename = await uploadToEkaraluAPI(img.data, img.mimetype);
+        if (filename && filename !== 'FILE_TOO_LARGE') {
+          savedFilenames.push(filename);
+        }
+      }
+    }
+    if (savedFilenames.length === 0) {
+      savedFilenames.push('default-property.png');
+    }
+
+    // Update existing listing
+    const success = await updatePropertyInDB(lastId, extractedJSON, savedFilenames);
+    if (!success) {
+       await client.sendMessage(chatId, `Failed to update property.`);
+       return;
+    }
+    const liveUrl = `${FRONTEND_URL}/property-detail.html?id=${lastId}`;
+    
+    let msgText = '';
+    if (missing.length > 0) {
+      msgText = `Your property has been updated based on your info!\n\nView and share it here:\n${liveUrl}\n\n*Important:* Some details are missing. To make your property verification complete and look more premium, please provide:\n${missing.map((m, i) => `${numEmojis[i] || '•'} ${m}`).join('\n')}\n\nJust reply to me with the missing info and I will automatically update your listing!`;
+    } else {
+      msgText = `Perfect! Your property has been updated and is fully detailed.\n\nView and share your listing here:\n${liveUrl}\n\nThank you for listing with Ekaralu! Let me know if you need to update anything else.`;
+    }
+    await client.sendMessage(chatId, msgText);
+  } else {
+    // NEW LISTING -> Pending Approvals Queue
+    const propId = `PROP_${Date.now().toString().slice(-4)}`;
+    pendingApprovals[propId] = {
+      chatId,
+      senderName,
+      images: session.images || [],
+      extractedJSON
+    };
+
+    // Send Admin Request
+    await client.sendMessage(`${VERIFIER_NUMBER}@c.us`, `[NEW LISTING REQUEST] ${propId}\nFrom: ${senderName} (${chatId.replace('@c.us','')})\n\nTitle: ${extractedJSON.title}\nType: ${extractedJSON.type} / ${extractedJSON.property_type}\nLocation: ${extractedJSON.locality}, ${extractedJSON.district}\nPrice: ${extractedJSON.price}\n\nApprove by replying: YES ${propId}`);
+
+    // Message to User
+    let msgText = `Your property details have been forwarded to our team for verification. I will notify you once it's approved and live!`;
+    if (missing.length > 0) {
+      msgText += `\n\n*Important:* Some details are missing. To make your property verification complete and look more premium, please provide:\n${missing.map((m, i) => `${numEmojis[i] || '•'} ${m}`).join('\n')}\n\nJust reply to me with the missing info and it will be attached to your listing.`;
+    }
+    await client.sendMessage(chatId, msgText);
+  }
 }
 
 // ── STATUS TRACKING ─────────────────────────────────────────────────────────
@@ -780,13 +865,17 @@ client.on('message', async (msg) => {
     if (processedMsgIds.has(msgId)) return;
     if (msg.timestamp && msg.timestamp < BOT_START_TIME) return;
 
-    processedMsgIds.add(msgId);
-    if (processedMsgIds.size > MSG_ID_CACHE_LIMIT) processedMsgIds.delete(processedMsgIds.values().next().value);
-
     const chat = await msg.getChat();
     const contact = await msg.getContact();
     const senderName = contact.pushname || contact.name || 'there';
     const chatId = chat.id._serialized;
+
+    // Track activity for automated reminders
+    getHistory(chatId); // ensures init
+    conversationHistory[chatId].lastActivityTime = Date.now();
+    saveConversations();
+
+    processedMsgIds.add(msgId);
 
     let body = msg.body || '';
 
@@ -960,7 +1049,8 @@ client.on('message', async (msg) => {
     }
 
     await chat.sendStateTyping();
-    const chatResult = await getEkaraluChatReply(chatId, body, senderName, agentName);
+    const userProps = await getUserProperties(chatId);
+    const chatResult = await getEkaraluChatReply(chatId, body, senderName, agentName, userProps);
 
     if (!chatResult.success) {
       console.error(`[CHAT FALLBACK] Failed to get conversational reply:`, chatResult.error);
@@ -988,11 +1078,23 @@ client.on('message', async (msg) => {
 
       // Still log the AI's internal response for debugging
       console.log(`[BUYER_SEARCH] ${senderName} searched for ${locality}, ${type}. Found ${results.length} results.`);
-    } else if (chatResult.reply.includes('<RUN_EXTRACTOR>')) {
-      // Haiku detected pure-text property listing.
-      console.log(`[ROUTE] ${senderName} text triggered property extraction.`);
+    } else if (chatResult.reply.includes('<RUN_EXTRACTOR')) {
+      // Parse NEW vs EDIT mode
+      const match = chatResult.reply.match(/<RUN_EXTRACTOR:\s*(EDIT|NEW)(?:,\s*ID=(\d+))?>/);
+      let mode = 'NEW';
+      let targetId = null;
 
-      // Send professional acknowledgment instantly
+      if (match) {
+        mode = match[1];
+        if (mode === 'EDIT' && match[2]) {
+          targetId = match[2];
+        }
+      }
+
+      console.log(`[ROUTE] ${senderName} text triggered property extraction. Mode: ${mode}, ID: ${targetId}`);
+      conversationHistory[chatId].listingMode = mode;
+      conversationHistory[chatId].activeUpdateId = targetId;
+
       await msg.reply(`Successfully captured. I've forwarded these property details to our verification team for a quick review.`);
 
       if (!uploadSessions[chatId]) {

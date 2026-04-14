@@ -140,12 +140,31 @@ const EKARALU_KNOWLEDGE = {
 };
 
 // ── BUILD SYSTEM PROMPT ───────────────────────────────────────────────────────
-function buildSystemPrompt(senderName, agentName) {
+function buildSystemPrompt(senderName, agentName, userProps = []) {
   const k = EKARALU_KNOWLEDGE;
+
+  let propertiesContext = '';
+  if (userProps && userProps.length > 0) {
+    propertiesContext = `\n---
+## USER'S EXISTING PROPERTIES
+This user already has the following properties listed with us:
+${userProps.map(p => `- ID: ${p.id} | ${p.title} (${p.property_type || p.type}) | Price: ${p.price}`).join('\n')}
+
+**IMPORTANT RULE FOR UPDATES:**
+If the user wants to UPDATE one of these existing properties, you MUST ask which property they are referring to by mentioning their titles or IDs. 
+Once they specify which property and what to update, output exactly: <RUN_EXTRACTOR: EDIT, ID=xyz> (replace xyz with the property ID).
+If they want to list a COMPLETELY NEW property, output exactly: <RUN_EXTRACTOR: NEW>.
+`;
+  } else {
+    propertiesContext = `\n---
+**IMPORTANT RULE FOR LISTINGS:**
+If the user wants to list a new property and provides details, output exactly: <RUN_EXTRACTOR: NEW>.
+`;
+  }
 
   return `
 You are ${agentName} — a real estate partner from Ekaralu.com.
-
+${propertiesContext}
 ---
 ## CORE IDENTITY
 - Your Name: ${agentName}
@@ -185,7 +204,7 @@ When both are known, output: <SEARCH_LISTINGS: locality, type>
 - IMPORTANT: When asking for missing details or listing questions, you MUST use emoji numbers (1️⃣, 2️⃣, 3️⃣, etc) instead of regular numbers (1., 2., 3.).
 - 1-3 sentences max per response.
 - If user provides partially numbered details, extract them and ask for the remaining ones.
-- ONLY say <RUN_EXTRACTOR> when the user provides actual property details to add or update.
+- ONLY say <RUN_EXTRACTOR: NEW> or <RUN_EXTRACTOR: EDIT, ID=...> when the user provides actual property details to add or update. Do NOT just say <RUN_EXTRACTOR>.
 `.trim();
 }
 
