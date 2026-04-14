@@ -1,0 +1,15 @@
+# --- Dependencies ---
+node_modules/
+
+# --- Secrets ---
+.env
+
+# --- WhatsApp Session (don't push — scan QR on server) ---
+.wwebjs_auth/
+.wwebjs_cache/
+
+# --- Runtime / Generated ---
+logs/
+sessions/
+conversations.json
+public/uploads/
