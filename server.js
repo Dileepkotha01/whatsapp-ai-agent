@@ -596,7 +596,7 @@ async function updatePropertyInDB(id, data, filenames) {
     ];
     await db.query(sql, params);
     
-    if (imageUrls.length > 0 && imageUrls[0] !== `${BACKEND_API_URL}/uploads/default-property.jpg`) {
+    if (imageUrls.length > 0 && imageUrls[0] !== `${BACKEND_API_URL}/uploads/default-property.png`) {
        await db.query('UPDATE properties SET images = ? WHERE id = ?', [JSON.stringify(imageUrls), id]);
     }
 
@@ -655,7 +655,7 @@ async function processPropertyUpload(chatId, senderName, client) {
 
   // Use default if no images
   if (savedFilenames.length === 0) {
-    savedFilenames.push('default-property.jpg');
+    savedFilenames.push('default-property.png');
   }
 
   let finalAction = 'listed';
@@ -691,7 +691,7 @@ async function processPropertyUpload(chatId, senderName, client) {
   if (!extractedJSON.property_type && !extractedJSON.type) missing.push("Property Type");
   if (!extractedJSON.owner_name || extractedJSON.owner_name === 'ASK_FOR_NAME') missing.push("Owner Name");
   if (!extractedJSON.owner_contact) missing.push("Owner Contact Number");
-  if (savedFilenames.length === 1 && savedFilenames[0] === 'default-property.jpg') missing.push("Images (Please upload real photos)");
+  if (savedFilenames.length === 1 && savedFilenames[0] === 'default-property.png') missing.push("Images (Please upload real photos)");
 
   let msgText = '';
   const numEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
